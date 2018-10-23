@@ -7,6 +7,7 @@ import os
 import sys
 sys.path.insert(1, os.path.join(sys.path[0], '..'))
 
+from tensorflow.contrib.rnn import * # Needed to get support for BlockLSTM
 import tensorflow as tf
 
 import util.audio
@@ -52,22 +53,52 @@ def run_inference():
         # currently hardcoded values used during inference
         n_input = 26
         n_context = 9
+        n_steps = 16
 
         with tf.Session(graph=graph) as session:
-            mfcc = util.audio.audiofile_to_input_vector(args.input_file_path, n_input, n_context)
+            session.run('prefix/initialize_state')
+
+            features = util.audio.audiofile_to_input_vector(args.input_file_path, n_input, n_context)
+            num_strides = len(features) - (n_context * 2)
+            window_size = 2 * n_context + 1
+
+            features = np.lib.stride_tricks.as_strided(
+                features,
+                (num_strides, window_size, n_input),
+                (features.strides[0], features.strides[0], features.strides[1]),
+                writeable=False)
+
 
             # we are interested only into logits, not CTC decoding
             inputs = {'input': graph.get_tensor_by_name('prefix/input_node:0'),
                       'input_lengths': graph.get_tensor_by_name('prefix/input_lengths:0')}
             outputs = {'outputs': graph.get_tensor_by_name('prefix/logits:0')}
 
-            output = session.run(outputs['outputs'], feed_dict={
-                inputs['input']: [mfcc],
-                inputs['input_lengths']: [len(mfcc)]
-            })
+            logits = np.empty([0, 1, alphabet.size() + 1])
 
-            for i in range(0, len(output)):
-                softmax_output = softmax(output[i][0])
+
+            for i in range(0, len(features), n_steps):
+                chunk = features[i:i + n_steps]
+
+                # pad with zeros if not enough steps (len(features) % FLAGS.n_steps != 0)
+                if len(chunk) < n_steps:
+                    chunk = np.pad(chunk,
+                                   (
+                                       (0, n_steps - len(chunk)),
+                                       (0, 0),
+                                       (0, 0)
+                                   ),
+                                   mode='constant',
+                                   constant_values=0)
+
+                output = session.run(outputs['outputs'], feed_dict={
+                    inputs['input']: [chunk],
+                    inputs['input_lengths']: [len(chunk)],
+                })
+                logits = np.concatenate((logits, output))
+
+            for i in range(0, len(logits)):
+                softmax_output = softmax(logits[i][0])
                 indexes_sorted = softmax_output.argsort()[args.predicted_character_count * -1:][::-1]
                 most_likely_chars = ''
                 chars_probability = ''
