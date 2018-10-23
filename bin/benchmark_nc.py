@@ -125,12 +125,10 @@ def maybe_inspect_zip(models):
     that were inside.
     '''
 
-    if len(models) > 1:
+    if not(is_zip_file(models)):
         return models
 
-    # With AOT, we may have just one file that is not a ZIP file
-    # so verify that we don't have a .zip extension
-    if not(is_zip_file(models)):
+    if len(models) > 1:
         return models
 
     if len(models) < 1:
@@ -376,23 +374,18 @@ def establish_ssh(target=None, auto_trust=False, allow_agent=True, look_keys=Tru
 
     return ssh_conn
 
-def run_benchmarks(dir, models, wav, alphabet, lm_binary=None, trie=None, iters=-1, extra_aot_model=None):
+def run_benchmarks(dir, models, wav, alphabet, lm_binary=None, trie=None, iters=-1):
     r'''
     Core of the running of the benchmarks. We will run on all of models, against
     the WAV file provided as wav, and the provided alphabet.
-
-    If supplied extra_aot_model, add another pass with the .so built AOT model.
     '''
 
     assert_valid_dir(dir)
 
     inference_times = [ ]
 
-    if extra_aot_model:
-        models.append(extra_aot_model)
-
     for model in models:
-        model_filename = '' if model is extra_aot_model else model
+        model_filename = model
 
         current_model = {
           'name':   model,
@@ -402,9 +395,9 @@ def run_benchmarks(dir, models, wav, alphabet, lm_binary=None, trie=None, iters=
         }
 
         if lm_binary and trie:
-            cmdline = './deepspeech "%s" "%s" "%s" "%s" "%s" -t' % (model_filename, wav, alphabet, lm_binary, trie)
+            cmdline = './deepspeech --model "%s" --alphabet "%s" --lm "%s" --trie "%s" --audio "%s" -t' % (model_filename, alphabet, lm_binary, trie, wav)
         else:
-            cmdline = './deepspeech "%s" "%s" "%s" -t' % (model_filename, wav, alphabet)
+            cmdline = './deepspeech --model "%s" --alphabet "%s" --audio "%s" -t' % (model_filename, alphabet, wav)
 
         for it in range(iters):
             sys.stdout.write('\rRunning %s: %d/%d' % (os.path.basename(model), (it+1), iters))
@@ -441,7 +434,7 @@ def produce_csv(input, output):
 
 def handle_args():
     parser = argparse.ArgumentParser(description='Benchmarking tooling for DeepSpeech native_client.')
-    parser.add_argument('--target', type=str, required=False,
+    parser.add_argument('--target', required=False,
                                  help='SSH user:pass@host string for remote benchmarking. This can also be a name of a matching \'Host\' in your SSH config.')
     parser.add_argument('--autotrust', action='store_true', default=False,
                                  help='SSH Paramiko policy to automatically trust unknown keys.')
@@ -453,19 +446,17 @@ def handle_args():
                                  help='Allow to look for SSH keys in ~/.ssh/.')
     parser.add_argument('--no-lookforkeys', action='store_false', dest='lookforkeys',
                                  help='Disallow to look for SSH keys in ~/.ssh/.')
-    parser.add_argument('--dir', type=str, required=False, default=None,
+    parser.add_argument('--dir', required=False, default=None,
                                  help='Local directory where to copy stuff. This will be mirrored to the remote system if needed (make sure to use path that will work on both).')
-    parser.add_argument('--models', type=str, nargs='+', required=False,
+    parser.add_argument('--models', nargs='+', required=False,
                                  help='List of files (protocolbuffer) to work on. Might be a zip file.')
-    parser.add_argument('--so-model', type=str, required=False,
-                                 help='Perform one step using AOT-based .so model')
-    parser.add_argument('--wav', type=str, required=False,
+    parser.add_argument('--wav', required=False,
                                  help='WAV file to pass to native_client. Supply again in plotting mode to draw realine line.')
-    parser.add_argument('--alphabet', type=str, required=False,
+    parser.add_argument('--alphabet', required=False,
                                  help='Text file to pass to native_client for the alphabet.')
-    parser.add_argument('--lm_binary', type=str, required=False,
+    parser.add_argument('--lm_binary', required=False,
                                  help='Path to the LM binary file used by the decoder.')
-    parser.add_argument('--trie', type=str, required=False,
+    parser.add_argument('--trie', required=False,
                                  help='Path to the trie file used by the decoder.')
     parser.add_argument('--iters', type=int, required=False, default=5,
                                  help='How many iterations to perfom on each model.')
@@ -473,7 +464,7 @@ def handle_args():
                                  help='Keeping run files (binaries & models).')
     parser.add_argument('--csv', type=argparse.FileType('w'), required=False,
                                  help='Target CSV file where to dump data.')
-    parser.add_argument('--binaries', type=str, required=False, default=None,
+    parser.add_argument('--binaries', required=False, default=None,
                                  help='Specify non TaskCluster native_client.tar.xz to use')
     return parser.parse_args()
 
@@ -482,19 +473,6 @@ def do_main():
 
     if not cli_args.models or not cli_args.wav or not cli_args.alphabet:
         raise AssertionError('Missing arguments (models, wav or alphabet)')
-
-    if cli_args.so_model:
-        '''
-        Verify we have a string that matches the format described in
-        reduce_filename above: NAME.aot.EPOCHS.XXX.YYY.so
-         - Where XXX is a variation on the model size for example
-         - And where YYY is a const related to the training dataset
-        '''
-
-        parts = cli_args.so_model.split('.')
-        assert len(parts) == 6
-        assert parts[1]   == 'aot'
-        assert parts[-1]  == 'so'
 
     if cli_args.dir is not None and not os.path.isdir(cli_args.dir):
         raise AssertionError('Inexistent temp directory')
@@ -514,9 +492,9 @@ def do_main():
     if cli_args.lm_binary and cli_args.trie:
         dest_lm_binary = os.path.join(tempdir, os.path.basename(cli_args.lm_binary))
         dest_trie = os.path.join(tempdir, os.path.basename(cli_args.trie))
-        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, extra_aot_model=cli_args.so_model, wav=dest_wav, alphabet=dest_alphabet, lm_binary=dest_lm_binary, trie=dest_trie, iters=cli_args.iters)
+        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, alphabet=dest_alphabet, lm_binary=dest_lm_binary, trie=dest_trie, iters=cli_args.iters)
     else:
-        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, extra_aot_model=cli_args.so_model, wav=dest_wav, alphabet=dest_alphabet, iters=cli_args.iters)
+        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, alphabet=dest_alphabet, iters=cli_args.iters)
 
     if cli_args.csv:
         produce_csv(input=inference_times, output=cli_args.csv)

@@ -28,35 +28,25 @@ export DS_DSDIR=${DS_ROOT_TASK}/DeepSpeech/ds
 
 export BAZEL_CTC_TARGETS="//native_client:libctc_decoder_with_kenlm.so"
 
-export EXTRA_AOT_CFLAGS=""
-export EXTRA_AOT_LDFLAGS="-L${DS_TFDIR}/bazel-bin/tensorflow/compiler/xla -L${DS_TFDIR}/bazel-bin/tensorflow/compiler/tf2xla -L${DS_TFDIR}/bazel-bin/tensorflow/compiler/aot -L${DS_TFDIR}/bazel-bin/tensorflow/compiler/xla/service/cpu"
-export EXTRA_AOT_LIBS="-ldeepspeech_model -lxla_compiled_cpu_function -lruntime -lruntime_matmul -lruntime_matvec -lexecutable_run_options"
+export DS_VERSION="$(cat ${DS_DSDIR}/VERSION)"
 
-# FIXME:
-# Previously, with r1.3, we could use timesteps of 64
-# With r1.4 it seems to eat too much resources at tfcompile step
-export BAZEL_AOT_BUILD_FLAGS="--define=DS_NATIVE_MODEL=1 --define=DS_MODEL_TIMESTEPS=16"
-export BAZEL_AOT_TARGETS="
-//native_client:deepspeech_model
-//tensorflow/compiler/aot:runtime
-//tensorflow/compiler/xla/service/cpu:runtime_matmul
-//tensorflow/compiler/xla/service/cpu:runtime_matvec
-//tensorflow/compiler/xla:executable_run_options
-//tensorflow/compiler/tf2xla:xla_compiled_cpu_function
-"
+model_source="${DEEPSPEECH_TEST_MODEL}"
+model_name="$(basename "${model_source}")"
+model_name_mmap="$(basename -s ".pb" "${model_source}").pbmm"
+model_source_mmap="$(dirname "${model_source}")/${model_name_mmap}"
 
-model_source=${DEEPSPEECH_TEST_MODEL}
-model_name=$(basename "${model_source}")
+SUPPORTED_PYTHON_VERSIONS=${SUPPORTED_PYTHON_VERSIONS:-2.7.14:ucs2 2.7.14:ucs4 3.4.8:ucs4 3.5.5:ucs4 3.6.4:ucs4 3.7.0:ucs4}
+SUPPORTED_NODEJS_VERSIONS=${SUPPORTED_NODEJS_VERSIONS:-4.9.1 5.12.0 6.14.1 7.10.1 8.11.1 9.11.1 10.3.0}
 
-SUPPORTED_PYTHON_VERSIONS=${SUPPORTED_PYTHON_VERSIONS:-2.7.13 3.4.6 3.5.3 3.6.2}
-# 7.10.0 and 8.0.0 targets fails to build
-# > ../deepspeech_wrap.cxx:966:23: error: 'WeakCallbackData' in namespace 'v8' does not name a type
-SUPPORTED_NODEJS_VERSIONS=${SUPPORTED_NODEJS_VERSIONS:-4.8.6 5.12.0 6.12.0 7.10.1 8.9.1 9.2.0}
+strip() {
+  echo "$(echo $1 | sed -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//')"
+}
 
+# This verify exact inference result
 assert_correct_inference()
 {
-  phrase=$1
-  expected=$2
+  phrase=$(strip "$1")
+  expected=$(strip "$2")
 
   if [ -z "${phrase}" -o -z "${expected}" ]; then
       echo "One or more empty strings:"
@@ -80,45 +70,162 @@ assert_correct_inference()
   fi;
 }
 
+# This verify that ${expected} is contained within ${phrase}
+assert_working_inference()
+{
+  phrase=$1
+  expected=$2
+
+  if [ -z "${phrase}" -o -z "${expected}" ]; then
+      echo "One or more empty strings:"
+      echo "phrase: <${phrase}>"
+      echo "expected: <${expected}>"
+      return 1
+  fi;
+
+  case "${phrase}" in
+      *${expected}*)
+          echo "Proper output has been produced:"
+          echo "${phrase}"
+          return 0
+      ;;
+
+      *)
+          echo "!! Non matching output !!"
+          echo "got: <${phrase}>"
+          echo "xxd:"; echo "${phrase}" | xxd
+          echo "-------------------"
+          echo "expected: <${expected}>"
+          echo "xxd:"; echo "${expected}" | xxd
+          return 1
+      ;;
+  esac
+}
+
+assert_shows_something()
+{
+  stderr=$1
+  expected=$2
+
+  if [ -z "${stderr}" -o -z "${expected}" ]; then
+      echo "One or more empty strings:"
+      echo "stderr: <${stderr}>"
+      echo "expected: <${expected}>"
+      return 1
+  fi;
+
+  case "${stderr}" in
+      *${expected}*)
+          echo "Proper output has been produced:"
+          echo "${stderr}"
+          return 0
+      ;;
+
+      *)
+          echo "!! Non matching output !!"
+          echo "got: <${stderr}>"
+          echo "xxd:"; echo "${stderr}" | xxd
+          echo "-------------------"
+          echo "expected: <${expected}>"
+          echo "xxd:"; echo "${expected}" | xxd
+          return 1
+      ;;
+  esac
+}
+
 assert_correct_ldc93s1()
 {
   assert_correct_inference "$1" "she had your dark suit in greasy wash water all year"
 }
 
-assert_correct_ldc93s1_prodmodel()
+assert_correct_ldc93s1_lm()
 {
-  assert_correct_inference "$1" "she had the duck so ingrecywachworallyear"
+  assert_correct_inference "$1" "she had your dark suit in greasy wash water all year"
 }
 
-assert_correct_ldc93s1_somodel()
+assert_correct_multi_ldc93s1()
 {
-    somodel_nolm=$1
-    somodel_withlm=$2
+  assert_shows_something "$1" "/LDC93S1.wav%she had your dark suit in greasy wash water all year%"
+  assert_shows_something "$1" "/LDC93S1_pcms16le_2_44100.wav%she had your dark suit in greasy wash water all year%"
+  ## 8k will output garbage anyway ...
+  # assert_shows_something "$1" "/LDC93S1_pcms16le_1_8000.wav%she hayorasryrtl lyreasy asr watal w water all year%"
+}
 
-    # We want to be able to return non zero value from the function, while not
-    # failing the whole execution
-    set +e
+assert_correct_ldc93s1_prodmodel()
+{
+  assert_correct_inference "$1" "she hadered or so and greasy wash war or year"
+}
 
-    assert_correct_ldc93s1 "${somodel_nolm}"
-    so_nolm=$?
+assert_correct_ldc93s1_prodmodel_stereo_44k()
+{
+  assert_correct_inference "$1" "she had tered or so and greasy wash war or year"
+}
 
-    assert_correct_ldc93s1 "${somodel_withlm}"
-    so_lm=$?
+assert_correct_warning_upsampling()
+{
+  assert_shows_something "$1" "erratic speech recognition"
+}
 
-    set -e
+assert_tensorflow_version()
+{
+  assert_shows_something "$1" "${EXPECTED_TENSORFLOW_VERSION}"
+}
 
-    # We accept that with no LM there may be errors, but we do not accept that
-    # for LM. For now.
-    if [ ${so_lm} -eq 1 ] && [ ${so_nolm} -eq 1 -o ${so_nolm} -eq 0 ];
-    then
-        exit 1
-    elif [ ${so_lm} -eq 0 ] && [ ${so_nolm} -eq 1 -o ${so_nolm} -eq 0 ];
-    then
-        exit 0
-    else
-        echo "Unexpected status"
-        exit 2
-    fi
+check_tensorflow_version()
+{
+  set +e
+  ds_help=$(deepspeech 2>&1 1>/dev/null)
+  set -e
+
+  assert_tensorflow_version "${ds_help}"
+}
+
+run_all_inference_tests()
+{
+  phrase_pbmodel_nolm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav)
+  assert_correct_ldc93s1 "${phrase_pbmodel_nolm}"
+
+  phrase_pbmodel_nolm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav)
+  assert_correct_ldc93s1 "${phrase_pbmodel_nolm}"
+
+  phrase_pbmodel_withlm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav)
+  assert_correct_ldc93s1_lm "${phrase_pbmodel_withlm}"
+
+  phrase_pbmodel_nolm_stereo_44k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_2_44100.wav)
+  assert_correct_ldc93s1 "${phrase_pbmodel_nolm_stereo_44k}"
+
+  phrase_pbmodel_withlm_stereo_44k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_2_44100.wav)
+  assert_correct_ldc93s1_lm "${phrase_pbmodel_withlm_stereo_44k}"
+
+  phrase_pbmodel_nolm_mono_8k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_1_8000.wav 2>&1 1>/dev/null)
+  assert_correct_warning_upsampling "${phrase_pbmodel_nolm_mono_8k}"
+
+  phrase_pbmodel_withlm_mono_8k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_1_8000.wav 2>&1 1>/dev/null)
+  assert_correct_warning_upsampling "${phrase_pbmodel_withlm_mono_8k}"
+}
+
+run_prod_inference_tests()
+{
+  phrase_pbmodel_withlm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav)
+  assert_correct_ldc93s1_prodmodel "${phrase_pbmodel_withlm}"
+
+  phrase_pbmodel_withlm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav)
+  assert_correct_ldc93s1_prodmodel "${phrase_pbmodel_withlm}"
+
+  phrase_pbmodel_withlm_stereo_44k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_2_44100.wav)
+  assert_correct_ldc93s1_prodmodel_stereo_44k "${phrase_pbmodel_withlm_stereo_44k}"
+
+  phrase_pbmodel_withlm_mono_8k=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/LDC93S1_pcms16le_1_8000.wav 2>&1 1>/dev/null)
+  assert_correct_warning_upsampling "${phrase_pbmodel_withlm_mono_8k}"
+}
+
+run_multi_inference_tests()
+{
+  multi_phrase_pbmodel_nolm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --audio ${TASKCLUSTER_TMP_DIR}/ | tr '\n' '%')
+  assert_correct_multi_ldc93s1 "${multi_phrase_pbmodel_nolm}"
+
+  multi_phrase_pbmodel_withlm=$(deepspeech --model ${TASKCLUSTER_TMP_DIR}/${model_name} --alphabet ${TASKCLUSTER_TMP_DIR}/alphabet.txt --lm ${TASKCLUSTER_TMP_DIR}/lm.binary --trie ${TASKCLUSTER_TMP_DIR}/trie --audio ${TASKCLUSTER_TMP_DIR}/ | tr '\n' '%')
+  assert_correct_multi_ldc93s1 "${multi_phrase_pbmodel_withlm}"
 }
 
 generic_download_tarxz()
@@ -143,11 +250,6 @@ download_native_client_files()
   generic_download_tarxz "$1" "${DEEPSPEECH_ARTIFACTS_ROOT}/native_client.tar.xz"
 }
 
-download_aot_model_files()
-{
-  generic_download_tarxz "$1" "${DEEPSPEECH_AOT_ARTIFACTS_ROOT}/native_client.tar.xz"
-}
-
 download_ctc_kenlm()
 {
   generic_download_tarxz "$1" "${DEEPSPEECH_LIBCTC}"
@@ -155,27 +257,27 @@ download_ctc_kenlm()
 
 download_data()
 {
-  wget ${model_source} -O ${TASKCLUSTER_TMP_DIR}/${model_name}
-  wget https://catalog.ldc.upenn.edu/desc/addenda/LDC93S1.wav -O ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav
+  wget -P "${TASKCLUSTER_TMP_DIR}" "${model_source}"
+  wget -P "${TASKCLUSTER_TMP_DIR}" "${model_source_mmap}"
+  cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/smoke_test/*.wav ${TASKCLUSTER_TMP_DIR}/
   cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/alphabet.txt ${TASKCLUSTER_TMP_DIR}/alphabet.txt
-  cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/lm/lm.binary ${TASKCLUSTER_TMP_DIR}/lm.binary
-  cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/lm/trie ${TASKCLUSTER_TMP_DIR}/trie
+  cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/smoke_test/vocab.pruned.lm ${TASKCLUSTER_TMP_DIR}/lm.binary
+  cp ${DS_ROOT_TASK}/DeepSpeech/ds/data/smoke_test/vocab.trie ${TASKCLUSTER_TMP_DIR}/trie
+}
+
+download_for_frozen()
+{
+  wget -O "${TASKCLUSTER_TMP_DIR}/frozen_model.pb" "${DEEPSPEECH_TEST_MODEL}"
 }
 
 download_material()
 {
   target_dir=$1
-  maybe_aot=$2
 
-  if [ "${maybe_aot}" = "--aot" ]; then
-    download_aot_model_files "${target_dir}"
-  else
-    download_native_client_files "${target_dir}"
-  fi
-
+  download_native_client_files "${target_dir}"
   download_data
 
-  ls -hal ${TASKCLUSTER_TMP_DIR}/${model_name} ${TASKCLUSTER_TMP_DIR}/LDC93S1.wav ${TASKCLUSTER_TMP_DIR}/alphabet.txt
+  ls -hal ${TASKCLUSTER_TMP_DIR}/${model_name} ${TASKCLUSTER_TMP_DIR}/${model_name_mmap} ${TASKCLUSTER_TMP_DIR}/LDC93S1*.wav ${TASKCLUSTER_TMP_DIR}/alphabet.txt
 }
 
 install_pyenv()
@@ -187,7 +289,7 @@ install_pyenv()
 
   git clone --quiet https://github.com/pyenv/pyenv.git ${PYENV_ROOT}
   pushd ${PYENV_ROOT}
-    git checkout --quiet 0c909f7457a027276a1d733d78bfbe70ba652047
+    git checkout --quiet c057a80c8296a7c694e4ef80ecbac0d0c169df7a
   popd
   eval "$(pyenv init -)"
 }
@@ -203,44 +305,95 @@ install_pyenv_virtualenv()
 
   git clone --quiet https://github.com/pyenv/pyenv-virtualenv.git ${PYENV_VENV}
   pushd ${PYENV_VENV}
-      git checkout --quiet 27270877575fe8c3e7be5385b8b6a1e4089b39aa
+      git checkout --quiet 5419dc732066b035a28680475acd7b661c7c397d
   popd
   eval "$(pyenv virtualenv-init -)"
 }
 
-do_get_model_parameters()
+maybe_install_xldd()
 {
-  local __result=$2
-  model_url=$1
-  model_file=/tmp/$(basename "${model_url}")
+  # -s required to avoid the noisy output like "Entering / Leaving directories"
+  toolchain=$(make -s -C ${DS_DSDIR}/native_client/ TARGET=${SYSTEM_TARGET} TFDIR=${DS_TFDIR} print-toolchain)
+  if [ ! -x "${toolchain}ldd" ]; then
+    cp "${DS_DSDIR}/native_client/xldd" "${toolchain}ldd" && chmod +x "${toolchain}ldd"
+  fi
+}
 
-  if [ -z "${model_url}" ]; then
-    echo "Empty URL for model"
+# Checks whether we run a patched version of bazel.
+# Patching is required to dump computeKey() parameters to .ckd files
+# See bazel.patch
+# Return 0 (success exit code) on patched version, 1 on release version
+is_patched_bazel()
+{
+  bazel_version=$(bazel version | grep 'Build label:' | cut -d':' -f2)
+
+  if [ -z "${bazel_version}" ]; then
+    return 0;
+  else
+    return 1;
+  fi;
+}
+
+verify_bazel_rebuild()
+{
+  bazel_explain_file="$1"
+
+  if [ ! -f "${bazel_explain_file}" ]; then
+    echo "No such explain file: ${bazel_explain_file}"
     exit 1
   fi;
 
-  wget "${model_url}" -O "${model_file}"
-  wget "${SUMMARIZE_GRAPH_BINARY}" -O "/tmp/summarize_graph"
-  wget "${LIBTENSORFLOW_FRAMEWORK}" -O "/tmp/libtensorflow_framework.so"
+  mkdir -p ${TASKCLUSTER_ARTIFACTS} || true
 
-  chmod +x /tmp/summarize_graph
+  cp ${DS_ROOT_TASK}/DeepSpeech/tf/bazel*.log ${TASKCLUSTER_ARTIFACTS}/
 
-  if [ ! -f "${model_file}" ]; then
-    echo "No such model: ${model_file}"
+  spurious_rebuilds=$(grep 'Executing action' "${bazel_explain_file}" | grep 'Compiling' | grep -v -E 'no entry in the cache|unconditional execution is requested' | wc -l)
+  if [ "${spurious_rebuilds}" -ne 0 ]; then
+    echo "Bazel rebuilds some file it should not, please check."
+
+    if is_patched_bazel; then
+      mkdir -p ${DS_ROOT_TASK}/DeepSpeech/ckd/ds ${DS_ROOT_TASK}/DeepSpeech/ckd/tf
+      tar xf ${DS_ROOT_TASK}/DeepSpeech/bazel-ckd-tf.tar --strip-components=4 -C ${DS_ROOT_TASK}/DeepSpeech/ckd/ds/
+      tar xf ${DS_ROOT_TASK}/DeepSpeech/bazel-ckd-ds.tar --strip-components=4 -C ${DS_ROOT_TASK}/DeepSpeech/ckd/tf/
+
+      echo "Making a diff between CKD files"
+      mkdir -p ${TASKCLUSTER_ARTIFACTS}
+      diff -urNw ${DS_ROOT_TASK}/DeepSpeech/ckd/tf/ ${DS_ROOT_TASK}/DeepSpeech/ckd/ds/ | tee ${TASKCLUSTER_ARTIFACTS}/ckd.diff
+
+      rm -fr ${DS_ROOT_TASK}/DeepSpeech/ckd/tf/ ${DS_ROOT_TASK}/DeepSpeech/ckd/ds/
+    else
+      echo "Cannot get CKD information from release, please use patched Bazel"
+    fi;
+
     exit 1
   fi;
-
-  model_width=$(/tmp/summarize_graph --in_graph="${model_file}" | grep "inputs" | grep -Eo "shape=\[\?,\?,[[:digit:]]+" | cut -d',' -f3)
-
-  eval $__result="'--define=DS_MODEL_FRAMESIZE=${model_width} --define=DS_MODEL_FILE=${model_file}'"
 }
 
 do_bazel_build()
 {
   cd ${DS_ROOT_TASK}/DeepSpeech/tf
   eval "export ${BAZEL_ENV_FLAGS}"
-  PATH=${DS_ROOT_TASK}/bin/:$PATH bazel ${BAZEL_OUTPUT_USER_ROOT} build \
-    -c opt ${BAZEL_BUILD_FLAGS} ${BAZEL_TARGETS}
+
+  if is_patched_bazel; then
+    find ${DS_ROOT_TASK}/DeepSpeech/tf/bazel-out/ -iname "*.ckd" | tar -cf ${DS_ROOT_TASK}/DeepSpeech/bazel-ckd-tf.tar -T -
+  fi;
+
+  bazel ${BAZEL_OUTPUT_USER_ROOT} build \
+    -s --explain bazel_monolithic.log --verbose_explanations --experimental_strict_action_env --config=monolithic -c opt ${BAZEL_BUILD_FLAGS} ${BAZEL_TARGETS}
+
+  if is_patched_bazel; then
+    find ${DS_ROOT_TASK}/DeepSpeech/tf/bazel-out/ -iname "*.ckd" | tar -cf ${DS_ROOT_TASK}/DeepSpeech/bazel-ckd-ds.tar -T -
+  fi;
+
+  verify_bazel_rebuild "${DS_ROOT_TASK}/DeepSpeech/tf/bazel_monolithic.log"
+}
+
+do_bazel_shared_build()
+{
+  cd ${DS_ROOT_TASK}/DeepSpeech/tf
+  eval "export ${BAZEL_ENV_FLAGS}"
+  bazel ${BAZEL_OUTPUT_USER_ROOT} build \
+    -s --explain bazel_shared.log --verbose_explanations --experimental_strict_action_env -c opt ${BAZEL_BUILD_FLAGS} ${BAZEL_TARGETS}
 }
 
 do_deepspeech_binary_build()
@@ -249,11 +402,54 @@ do_deepspeech_binary_build()
   make -C native_client/ \
     TARGET=${SYSTEM_TARGET} \
     TFDIR=${DS_TFDIR} \
-    RASPBIAN=/tmp/multistrap-raspbian-jessie \
+    RASPBIAN=${SYSTEM_RASPBIAN} \
     EXTRA_CFLAGS="${EXTRA_LOCAL_CFLAGS}" \
     EXTRA_LDFLAGS="${EXTRA_LOCAL_LDFLAGS}" \
     EXTRA_LIBS="${EXTRA_LOCAL_LIBS}" \
     deepspeech
+}
+
+# Hack to extract Ubuntu's 16.04 libssl 1.0.2 packages and use them during the
+# local build of Python.
+#
+# Avoid (risky) upgrade of base system, allowing to keep one task build that
+# builds all the python packages
+maybe_ssl102_py37()
+{
+    pyver=$1
+
+    unset PY37_OPENSSL
+    unset PY37_LDPATH
+    unset PY37_SOURCE_PACKAGE
+
+    case "${pyver}" in
+        3.7*)
+            if [ "${OS}" = "Linux" ]; then
+                PY37_OPENSSL_DIR=${DS_ROOT_TASK}/ssl-xenial
+                mkdir -p ${PY37_OPENSSL_DIR}
+                wget -P ${TASKCLUSTER_TMP_DIR} \
+                        http://${TASKCLUSTER_WORKER_GROUP}.ec2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl-dev_1.0.2g-1ubuntu4.13_amd64.deb \
+                        http://${TASKCLUSTER_WORKER_GROUP}.ec2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.0.0_1.0.2g-1ubuntu4.13_amd64.deb
+
+                for deb in ${TASKCLUSTER_TMP_DIR}/libssl*.deb; do
+                    dpkg -x ${deb} ${PY37_OPENSSL_DIR}
+                done;
+
+                # Python configure expects things to be under lib/
+                mv ${PY37_OPENSSL_DIR}/usr/include/x86_64-linux-gnu/openssl/opensslconf.h ${PY37_OPENSSL_DIR}/usr/include/openssl/
+                mv ${PY37_OPENSSL_DIR}/lib/x86_64-linux-gnu/lib* ${PY37_OPENSSL_DIR}/usr/lib/
+                mv ${PY37_OPENSSL_DIR}/usr/lib/x86_64-linux-gnu/* ${PY37_OPENSSL_DIR}/usr/lib/
+                ln -sfn libcrypto.so.1.0.0 ${PY37_OPENSSL_DIR}/usr/lib/libcrypto.so
+                ln -sfn libssl.so.1.0.0 ${PY37_OPENSSL_DIR}/usr/lib/libssl.so
+
+                export PY37_OPENSSL="--with-openssl=${PY37_OPENSSL_DIR}/usr"
+                export PY37_LDPATH="${PY37_OPENSSL_DIR}/usr/lib/"
+            fi;
+
+	    export NUMPY_BUILD_VERSION="==1.14.5"
+	    export NUMPY_DEP_VERSION=">=1.14.5"
+        ;;
+    esac
 }
 
 do_deepspeech_python_build()
@@ -275,24 +471,42 @@ do_deepspeech_python_build()
     SETUP_FLAGS="--project_name deepspeech-gpu"
   fi
 
-  for pyver in ${SUPPORTED_PYTHON_VERSIONS}; do
-    pyenv install ${pyver}
+  for pyver_conf in ${SUPPORTED_PYTHON_VERSIONS}; do
+    pyver=$(echo "${pyver_conf}" | cut -d':' -f1)
+    pyconf=$(echo "${pyver_conf}" | cut -d':' -f2)
+
+    export NUMPY_BUILD_VERSION="==1.7.0"
+    export NUMPY_DEP_VERSION=">=1.7.0"
+
+    maybe_ssl102_py37 ${pyver}
+
+    LD_LIBRARY_PATH=${PY37_LDPATH}:$LD_LIBRARY_PATH PYTHON_CONFIGURE_OPTS="--enable-unicode=${pyconf} ${PY37_OPENSSL}" pyenv install ${pyver}
+
     pyenv virtualenv ${pyver} deepspeech
     source ${PYENV_ROOT}/versions/${pyver}/envs/deepspeech/bin/activate
 
-    EXTRA_CFLAGS="${EXTRA_LOCAL_CFLAGS}" EXTRA_LDFLAGS="${EXTRA_LOCAL_LDFLAGS}" EXTRA_LIBS="${EXTRA_LOCAL_LIBS}" make -C native_client/ \
-      TARGET=${SYSTEM_TARGET} \
-      RASPBIAN=/tmp/multistrap-raspbian-jessie \
-      TFDIR=${DS_TFDIR} \
-      SETUP_FLAGS="${SETUP_FLAGS}" \
-      bindings-clean bindings
+    # Set LD path because python ssl might require it
+    LD_LIBRARY_PATH=${PY37_LDPATH}:$LD_LIBRARY_PATH \
+    EXTRA_CFLAGS="${EXTRA_LOCAL_CFLAGS}" \
+    EXTRA_LDFLAGS="${EXTRA_LOCAL_LDFLAGS}" \
+    EXTRA_LIBS="${EXTRA_LOCAL_LIBS}" \
+    make -C native_client/python/ \
+        TARGET=${SYSTEM_TARGET} \
+        RASPBIAN=${SYSTEM_RASPBIAN} \
+        TFDIR=${DS_TFDIR} \
+        SETUP_FLAGS="${SETUP_FLAGS}" \
+        bindings-clean bindings
 
-    cp native_client/dist/*.whl wheels
+    cp native_client/python/dist/*.whl wheels
 
-    make -C native_client/ bindings-clean
+    make -C native_client/python/ bindings-clean
+
+    unset NUMPY_BUILD_VERSION
+    unset NUMPY_DEP_VERSION
 
     deactivate
     pyenv uninstall --force deepspeech
+    pyenv uninstall --force ${pyver}
   done;
 }
 
@@ -307,7 +521,7 @@ do_deepspeech_nodejs_build()
   for node in ${SUPPORTED_NODEJS_VERSIONS}; do
     EXTRA_CFLAGS="${EXTRA_LOCAL_CFLAGS}" EXTRA_LDFLAGS="${EXTRA_LOCAL_LDFLAGS}" EXTRA_LIBS="${EXTRA_LOCAL_LIBS}" make -C native_client/javascript \
       TARGET=${SYSTEM_TARGET} \
-      RASPBIAN=/tmp/multistrap-raspbian-jessie \
+      RASPBIAN=${SYSTEM_RASPBIAN} \
       TFDIR=${DS_TFDIR} \
       NODE_ABI_TARGET=--target=$node \
       clean node-wrapper
@@ -361,30 +575,19 @@ package_native_client()
 
   if [ -f "${tensorflow_dir}/bazel-bin/native_client/libdeepspeech_model.so" ]; then
     tar -cf - \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/ libtensorflow_cc.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/ libtensorflow_framework.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/compiler/aot/ libruntime.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/compiler/xla/service/cpu/ libruntime_matmul.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/compiler/xla/service/cpu/ libruntime_matvec.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/compiler/xla/ libexecutable_run_options.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/compiler/tf2xla/ libxla_compiled_cpu_function.so \
       -C ${tensorflow_dir}/bazel-bin/native_client/ generate_trie \
       -C ${tensorflow_dir}/bazel-bin/native_client/ libctc_decoder_with_kenlm.so \
       -C ${tensorflow_dir}/bazel-bin/native_client/ libdeepspeech.so \
       -C ${tensorflow_dir}/bazel-bin/native_client/ libdeepspeech_model.so \
-      -C ${tensorflow_dir}/bazel-bin/native_client/ libdeepspeech_utils.so \
       -C ${deepspeech_dir}/ LICENSE \
       -C ${deepspeech_dir}/native_client/ deepspeech \
       -C ${deepspeech_dir}/native_client/kenlm/ README.mozilla \
       | pixz -9 > "${artifacts_dir}/${artifact_name}"
   else
     tar -cf - \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/ libtensorflow_cc.so \
-      -C ${tensorflow_dir}/bazel-bin/tensorflow/ libtensorflow_framework.so \
       -C ${tensorflow_dir}/bazel-bin/native_client/ generate_trie \
       -C ${tensorflow_dir}/bazel-bin/native_client/ libctc_decoder_with_kenlm.so \
       -C ${tensorflow_dir}/bazel-bin/native_client/ libdeepspeech.so \
-      -C ${tensorflow_dir}/bazel-bin/native_client/ libdeepspeech_utils.so \
       -C ${deepspeech_dir}/ LICENSE \
       -C ${deepspeech_dir}/native_client/ deepspeech \
       -C ${deepspeech_dir}/native_client/kenlm/ README.mozilla \

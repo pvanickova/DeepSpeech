@@ -58,7 +58,7 @@
     defined(__mips__) || defined(__powerpc__) || \
     defined(__sparc__) || defined(__sparc) || defined(__s390__) || \
     defined(__SH4__) || defined(__alpha__) || \
-    defined(_MIPS_ARCH_MIPS32R2)
+    defined(_MIPS_ARCH_MIPS32R2) || defined(__aarch64__)
 #define DOUBLE_CONVERSION_CORRECT_DOUBLE_OPERATIONS 1
 #elif defined(_M_IX86) || defined(__i386__) || defined(__i386)
 #if defined(_WIN32)
@@ -126,7 +126,7 @@ typedef unsigned __int64 uint64_t;
   DISALLOW_COPY_AND_ASSIGN(TypeName)
 #endif
 
-namespace double_conversion {
+namespace kenlm_double_conversion {
 
 static const int kCharSize = sizeof(char);
 
@@ -315,6 +315,6 @@ inline Dest BitCast(Source* source) {
   return BitCast<Dest>(reinterpret_cast<uintptr_t>(source));
 }
 
-}  // namespace double_conversion
+}  // namespace kenlm_double_conversion
 
 #endif  // DOUBLE_CONVERSION_UTILS_H_

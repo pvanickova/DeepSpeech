@@ -1,12 +1,23 @@
 {
     "name" : "$(PROJECT_NAME)",
-    "version" : "0.1.0",
+    "version" : "$(PROJECT_VERSION)",
     "description" : "DeepSpeech NodeJS bindings",
     "main" : "./index",
     "bin": {
        "deepspeech": "./client.js"
     },
     "author" : "Mozilla",
+    "license": "MPL-2.0",
+    "homepage": "https://github.com/mozilla/DeepSpeech/tree/v$(PROJECT_VERSION)#project-deepspeech",
+    "files": [
+       "README.md",
+       "client.js",
+       "index.js",
+       "lib/*"
+    ],
+    "bugs": {
+       "url": "https://github.com/mozilla/DeepSpeech/issues"
+    },
     "repository"   :  {
        "type" : "git",
        "url"  : "git://github.com/mozilla/DeepSpeech.git"
@@ -22,7 +33,8 @@
       "node-pre-gyp": "0.6.x",
       "argparse": "1.0.x",
       "sox-stream": "2.0.x",
-      "memory-stream": "0.0.3"
+      "memory-stream": "0.0.3",
+      "node-wav": "0.0.2"
     },
     "bundledDependencies":["node-pre-gyp"],
     "devDependencies": {

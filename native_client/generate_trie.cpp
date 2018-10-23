@@ -7,7 +7,7 @@ using namespace std;
 #include "trie_node.h"
 #include "alphabet.h"
 
-typedef lm::ngram::ProbingModel Model;
+typedef lm::ngram::QuantArrayTrieModel Model;
 
 lm::WordIndex GetWordIndex(const Model& model, const std::string& word) {
   return model.GetVocabulary().Index(word);
@@ -27,7 +27,7 @@ int generate_trie(const char* alphabet_path, const char* kenlm_path, const char*
   Model model(kenlm_path, config);
   TrieNode root(a.GetSize());
 
-  std::ifstream ifs(vocab_path, std::ifstream::in);
+  std::ifstream ifs(vocab_path, std::ifstream::in | std::ios::binary);
   if (!ifs) {
     std::cerr << "unable to open vocabulary file " << vocab_path << std::endl;
     return -1;
