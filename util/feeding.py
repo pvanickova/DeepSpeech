@@ -1,199 +1,180 @@
+# -*- coding: utf-8 -*-
+from __future__ import absolute_import, division, print_function
+
+import os
+
+from functools import partial
+
 import numpy as np
+import pandas
 import tensorflow as tf
 
-from math import ceil
-from six.moves import range
-from threading import Thread
-from util.gpu import get_available_gpus
-from util.text import ctc_label_dense_to_sparse
+from tensorflow.python.ops import gen_audio_ops as contrib_audio
+
+from util.config import Config
+from util.text import text_to_char_array
+from util.flags import FLAGS
+from util.spectrogram_augmentations import augment_freq_time_mask, augment_dropout, augment_pitch_and_tempo, augment_speed_up
+from util.audio import read_frames_from_file, vad_split, DEFAULT_FORMAT
 
 
-class ModelFeeder(object):
-    '''
-    Feeds data into a model.
-    Feeding is parallelized by independent units called tower feeders (usually one per GPU).
-    Each tower feeder provides data from three runtime switchable sources (train, dev, test).
-    These sources are to be provided by three DataSet instances whos references are kept.
-    Creates, owns and delegates to tower_feeder_count internal tower feeder objects.
-    '''
-    def __init__(self,
-                 train_set,
-                 dev_set,
-                 test_set,
-                 numcep,
-                 numcontext,
-                 alphabet,
-                 tower_feeder_count=-1,
-                 threads_per_queue=4):
-
-        self.train = train_set
-        self.dev = dev_set
-        self.test = test_set
-        self.sets = [train_set, dev_set, test_set]
-        self.numcep = numcep
-        self.numcontext = numcontext
-        self.tower_feeder_count = max(len(get_available_gpus()), 1) if tower_feeder_count < 0 else tower_feeder_count
-        self.threads_per_queue = threads_per_queue
-
-        self.ph_x = tf.placeholder(tf.float32, [None, 2*numcontext+1, numcep])
-        self.ph_x_length = tf.placeholder(tf.int32, [])
-        self.ph_y = tf.placeholder(tf.int32, [None,])
-        self.ph_y_length = tf.placeholder(tf.int32, [])
-        self.ph_batch_size = tf.placeholder(tf.int32, [])
-        self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
-
-        self._tower_feeders = [_TowerFeeder(self, i, alphabet) for i in range(self.tower_feeder_count)]
-
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts required queue threads on all tower feeders.
-        '''
-        queue_threads = []
-        for tower_feeder in self._tower_feeders:
-            queue_threads += tower_feeder.start_queue_threads(session, coord)
-        return queue_threads
-
-    def close_queues(self, session):
-        '''
-        Closes queues of all tower feeders.
-        '''
-        for tower_feeder in self._tower_feeders:
-            tower_feeder.close_queues(session)
-
-    def set_data_set(self, feed_dict, data_set):
-        '''
-        Switches all tower feeders to a different source DataSet.
-        The provided feed_dict will get enriched with required placeholder/value pairs.
-        The DataSet has to be one of those that got passed into the constructor.
-        '''
-        index = self.sets.index(data_set)
-        assert index >= 0
-        feed_dict[self.ph_queue_selector] = index
-        feed_dict[self.ph_batch_size] = data_set.batch_size
-
-    def next_batch(self, tower_feeder_index):
-        '''
-        Draw the next batch from one of the tower feeders.
-        '''
-        return self._tower_feeders[tower_feeder_index].next_batch()
+def read_csvs(csv_files):
+    sets = []
+    for csv in csv_files:
+        file = pandas.read_csv(csv, encoding='utf-8', na_filter=False)
+        #FIXME: not cross-platform
+        csv_dir = os.path.dirname(os.path.abspath(csv))
+        file['wav_filename'] = file['wav_filename'].str.replace(r'(^[^/])', lambda m: os.path.join(csv_dir, m.group(1))) # pylint: disable=cell-var-from-loop
+        sets.append(file)
+    # Concat all sets, drop any extra columns, re-index the final result as 0..N
+    return pandas.concat(sets, join='inner', ignore_index=True)
 
 
-class DataSet(object):
-    '''
-    Represents a collection of audio samples and their respective transcriptions.
-    Takes a set of CSV files produced by importers in /bin.
-    '''
-    def __init__(self, data, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1):
-        self.data = data
-        self.data.sort_values(by="features_len", ascending=ascending, inplace=True)
-        self.batch_size = batch_size
-        self.next_index = next_index
-        self.total_batches = int(ceil(len(self.data) / batch_size))
+def samples_to_mfccs(samples, sample_rate, train_phase=False):
+    spectrogram = contrib_audio.audio_spectrogram(samples,
+                                                  window_size=Config.audio_window_samples,
+                                                  stride=Config.audio_step_samples,
+                                                  magnitude_squared=True)
+
+    # Data Augmentations
+    if train_phase:
+        if FLAGS.augmentation_spec_dropout_keeprate < 1:
+            spectrogram = augment_dropout(spectrogram,
+                                          keep_prob=FLAGS.augmentation_spec_dropout_keeprate)
+
+        if FLAGS.augmentation_freq_and_time_masking:
+            spectrogram = augment_freq_time_mask(spectrogram,
+                                                 frequency_masking_para=FLAGS.augmentation_freq_and_time_masking_freq_mask_range,
+                                                 time_masking_para=FLAGS.augmentation_freq_and_time_masking_time_mask_range,
+                                                 frequency_mask_num=FLAGS.augmentation_freq_and_time_masking_number_freq_masks,
+                                                 time_mask_num=FLAGS.augmentation_freq_and_time_masking_number_time_masks)
+
+        if FLAGS.augmentation_pitch_and_tempo_scaling:
+            spectrogram = augment_pitch_and_tempo(spectrogram,
+                                                  max_tempo=FLAGS.augmentation_pitch_and_tempo_scaling_max_tempo,
+                                                  max_pitch=FLAGS.augmentation_pitch_and_tempo_scaling_max_pitch,
+                                                  min_pitch=FLAGS.augmentation_pitch_and_tempo_scaling_min_pitch)
+
+        if FLAGS.augmentation_speed_up_std > 0:
+            spectrogram = augment_speed_up(spectrogram, speed_std=FLAGS.augmentation_speed_up_std)
+
+    mfccs = contrib_audio.mfcc(spectrogram, sample_rate, dct_coefficient_count=Config.n_input)
+    mfccs = tf.reshape(mfccs, [-1, Config.n_input])
+
+    return mfccs, tf.shape(input=mfccs)[0]
 
 
-class _DataSetLoader(object):
-    '''
-    Internal class that represents an input queue with data from one of the DataSet objects.
-    Each tower feeder will create and combine three data set loaders to one switchable queue.
-    Keeps a ModelFeeder reference for accessing shared settings and placeholders.
-    Keeps a DataSet reference to access its samples.
-    '''
-    def __init__(self, model_feeder, data_set, alphabet):
-        self._model_feeder = model_feeder
-        self._data_set = data_set
-        self.queue = tf.PaddingFIFOQueue(shapes=[[None, 2 * model_feeder.numcontext + 1, model_feeder.numcep], [], [None,], []],
-                                                  dtypes=[tf.float32, tf.int32, tf.int32, tf.int32],
-                                                  capacity=data_set.batch_size * 8)
-        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
-        self._close_op = self.queue.close(cancel_pending_enqueues=True)
-        self._alphabet = alphabet
+def audiofile_to_features(wav_filename, train_phase=False):
+    samples = tf.io.read_file(wav_filename)
+    decoded = contrib_audio.decode_wav(samples, desired_channels=1)
+    features, features_len = samples_to_mfccs(decoded.audio, decoded.sample_rate, train_phase=train_phase)
 
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts concurrent queue threads for reading samples from the data set.
-        '''
-        queue_threads = [Thread(target=self._populate_batch_queue, args=(session, coord))
-                         for i in range(self._model_feeder.threads_per_queue)]
-        for queue_thread in queue_threads:
-            coord.register_thread(queue_thread)
-            queue_thread.daemon = True
-            queue_thread.start()
-        return queue_threads
+    if train_phase:
+        if FLAGS.data_aug_features_multiplicative > 0:
+            features = features*tf.random.normal(mean=1, stddev=FLAGS.data_aug_features_multiplicative, shape=tf.shape(features))
 
-    def close_queue(self, session):
-        '''
-        Closes the data set queue.
-        '''
-        session.run(self._close_op)
+        if FLAGS.data_aug_features_additive > 0:
+            features = features+tf.random.normal(mean=0.0, stddev=FLAGS.data_aug_features_additive, shape=tf.shape(features))
 
-    def _populate_batch_queue(self, session, coord):
-        '''
-        Queue thread routine.
-        '''
-        file_count = len(self._data_set.data)
-        index = -1
-        while not coord.should_stop():
-            index = self._data_set.next_index(index) % file_count
-            features, _, transcript, transcript_len = self._data_set.data.iloc[index]
-
-            # One stride per time step in the input
-            num_strides = len(features) - (self._model_feeder.numcontext * 2)
-
-            # Create a view into the array with overlapping strides of size
-            # numcontext (past) + 1 (present) + numcontext (future)
-            window_size = 2*self._model_feeder.numcontext+1
-            features = np.lib.stride_tricks.as_strided(
-                features,
-                (num_strides, window_size, self._model_feeder.numcep),
-                (features.strides[0], features.strides[0], features.strides[1]),
-                writeable=False)
-
-            try:
-                session.run(self._enqueue_op, feed_dict={
-                    self._model_feeder.ph_x: features,
-                    self._model_feeder.ph_x_length: num_strides,
-                    self._model_feeder.ph_y: transcript,
-                    self._model_feeder.ph_y_length: transcript_len
-                })
-            except tf.errors.CancelledError:
-                return
+    return features, features_len
 
 
-class _TowerFeeder(object):
-    '''
-    Internal class that represents a switchable input queue for one tower.
-    It creates, owns and combines three _DataSetLoader instances.
-    Keeps a ModelFeeder reference for accessing shared settings and placeholders.
-    '''
-    def __init__(self, model_feeder, index, alphabet):
-        self._model_feeder = model_feeder
-        self.index = index
-        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet) for data_set in model_feeder.sets]
-        self._queues = [set_queue.queue for set_queue in self._loaders]
-        self._queue = tf.QueueBase.from_list(model_feeder.ph_queue_selector, self._queues)
-        self._close_op = self._queue.close(cancel_pending_enqueues=True)
+def entry_to_features(wav_filename, transcript, train_phase):
+    # https://bugs.python.org/issue32117
+    features, features_len = audiofile_to_features(wav_filename, train_phase=train_phase)
+    return wav_filename, features, features_len, tf.SparseTensor(*transcript)
 
-    def next_batch(self):
-        '''
-        Draw the next batch from from the combined switchable queue.
-        '''
-        source, source_lengths, target, target_lengths = self._queue.dequeue_many(self._model_feeder.ph_batch_size)
-        sparse_labels = ctc_label_dense_to_sparse(target, target_lengths, self._model_feeder.ph_batch_size)
-        return source, source_lengths, sparse_labels
 
-    def start_queue_threads(self, session, coord):
-        '''
-        Starts the queue threads of all owned _DataSetLoader instances.
-        '''
-        queue_threads = []
-        for set_queue in self._loaders:
-            queue_threads += set_queue.start_queue_threads(session, coord)
-        return queue_threads
+def to_sparse_tuple(sequence):
+    r"""Creates a sparse representention of ``sequence``.
+        Returns a tuple with (indices, values, shape)
+    """
+    indices = np.asarray(list(zip([0]*len(sequence), range(len(sequence)))), dtype=np.int64)
+    shape = np.asarray([1, len(sequence)], dtype=np.int64)
+    return indices, sequence, shape
 
-    def close_queues(self, session):
-        '''
-        Closes queues of all owned _DataSetLoader instances.
-        '''
-        for set_queue in self._loaders:
-            set_queue.close_queue(session)
 
+def create_dataset(csvs, batch_size, enable_cache=False, cache_path=None, train_phase=False):
+    df = read_csvs(csvs)
+    df.sort_values(by='wav_filesize', inplace=True)
+
+    df['transcript'] = df.apply(text_to_char_array, alphabet=Config.alphabet, result_type='reduce', axis=1)
+
+    def generate_values():
+        for _, row in df.iterrows():
+            yield row.wav_filename, to_sparse_tuple(row.transcript)
+
+    # Batching a dataset of 2D SparseTensors creates 3D batches, which fail
+    # when passed to tf.nn.ctc_loss, so we reshape them to remove the extra
+    # dimension here.
+    def sparse_reshape(sparse):
+        shape = sparse.dense_shape
+        return tf.sparse.reshape(sparse, [shape[0], shape[2]])
+
+    def batch_fn(wav_filenames, features, features_len, transcripts):
+        features = tf.data.Dataset.zip((features, features_len))
+        features = features.padded_batch(batch_size,
+                                         padded_shapes=([None, Config.n_input], []))
+        transcripts = transcripts.batch(batch_size).map(sparse_reshape)
+        wav_filenames = wav_filenames.batch(batch_size)
+        return tf.data.Dataset.zip((wav_filenames, features, transcripts))
+
+    num_gpus = len(Config.available_devices)
+    process_fn = partial(entry_to_features, train_phase=train_phase)
+
+    dataset = (tf.data.Dataset.from_generator(generate_values,
+                                              output_types=(tf.string, (tf.int64, tf.int32, tf.int64)))
+                              .map(process_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE))
+
+    if enable_cache:
+        dataset = dataset.cache(cache_path)
+
+    dataset = (dataset.window(batch_size, drop_remainder=True).flat_map(batch_fn)
+                      .prefetch(num_gpus))
+
+    return dataset
+
+
+def split_audio_file(audio_path,
+                     audio_format=DEFAULT_FORMAT,
+                     batch_size=1,
+                     aggressiveness=3,
+                     outlier_duration_ms=10000,
+                     outlier_batch_size=1):
+    sample_rate, _, sample_width = audio_format
+    multiplier = 1.0 / (1 << (8 * sample_width - 1))
+
+    def generate_values():
+        frames = read_frames_from_file(audio_path)
+        segments = vad_split(frames, aggressiveness=aggressiveness)
+        for segment in segments:
+            segment_buffer, time_start, time_end = segment
+            samples = np.frombuffer(segment_buffer, dtype=np.int16)
+            samples = samples * multiplier
+            samples = np.expand_dims(samples, axis=1)
+            yield time_start, time_end, samples
+
+    def to_mfccs(time_start, time_end, samples):
+        features, features_len = samples_to_mfccs(samples, sample_rate)
+        return time_start, time_end, features, features_len
+
+    def create_batch_set(bs, criteria):
+        return (tf.data.Dataset
+                .from_generator(generate_values, output_types=(tf.int32, tf.int32, tf.float32))
+                .map(to_mfccs, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+                .filter(criteria)
+                .padded_batch(bs, padded_shapes=([], [], [None, Config.n_input], [])))
+
+    nds = create_batch_set(batch_size,
+                           lambda start, end, f, fl: end - start <= int(outlier_duration_ms))
+    ods = create_batch_set(outlier_batch_size,
+                           lambda start, end, f, fl: end - start > int(outlier_duration_ms))
+    dataset = nds.concatenate(ods)
+    dataset = dataset.prefetch(len(Config.available_devices))
+    return dataset
+
+
+def secs_to_hours(secs):
+    hours, remainder = divmod(secs, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return '%d:%02d:%02d' % (hours, minutes, seconds)

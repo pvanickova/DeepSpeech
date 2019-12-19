@@ -8,6 +8,7 @@
 /runs
 /logs
 /exports
+/data/ldc93s1
 /native_client/setup.cfg
 /native_client/build
 /native_client/*.egg-info
@@ -19,3 +20,6 @@
 /native_client/python/utils_wrap.cpp
 /native_client/javascript/build
 /native_client/javascript/deepspeech_wrap.cxx
+/doc/.build/
+/doc/xml-c/
+/doc/xml-java/
