@@ -26,6 +26,7 @@ import zipfile
 
 from six import iteritems
 from six.moves import range, map
+from functools import cmp_to_key
 
 r'''
  Tool to:
@@ -74,16 +75,16 @@ def get_arch_string():
         raise AssertionError('Error checking OS')
 
     stdout = stdout.lower().strip()
-    if not 'linux' in stdout:
+    if not b'linux' in stdout:
         raise AssertionError('Unsupported OS')
 
-    if 'armv7l' in stdout:
+    if b'armv7l' in stdout:
         return 'arm'
 
-    if 'x86_64' in stdout:
+    if b'x86_64' in stdout:
         nv_rc, nv_stdout, nv_stderr = exec_command('nvidia-smi')
         nv_stdout = nv_stdout.lower().strip()
-        if 'NVIDIA-SMI' in nv_stdout:
+        if b'NVIDIA-SMI' in nv_stdout:
             return 'gpu'
         else:
             return 'cpu'
@@ -181,7 +182,7 @@ def all_files(models=[]):
             return 1
 
     base = list(map(lambda x: os.path.abspath(x), maybe_inspect_zip(models)))
-    base.sort(cmp=nsort)
+    base.sort(key=cmp_to_key(nsort))
 
     return base
 
@@ -238,7 +239,7 @@ def delete_tree(dir):
     except IOError:
         print('No remote directory: %s' % dir)
 
-def setup_tempdir(dir, models, wav, alphabet, lm_binary, trie, binaries):
+def setup_tempdir(dir, models, wav, lm_binary, trie, binaries):
     r'''
     Copy models, libs and binary to a directory (new one if dir is None)
     '''
@@ -254,7 +255,7 @@ def setup_tempdir(dir, models, wav, alphabet, lm_binary, trie, binaries):
     extract_native_client_tarball(dir)
 
     filenames = map(lambda x: os.path.join(dir, os.path.basename(x)), sorted_models)
-    missing_models = filter(lambda x: not os.path.isfile(x), filenames)
+    missing_models = list(filter(lambda x: not os.path.isfile(x), filenames))
     if len(missing_models) > 0:
         # If we have a ZIP file, directly extract it to the proper path
         if is_zip_file(models):
@@ -267,7 +268,7 @@ def setup_tempdir(dir, models, wav, alphabet, lm_binary, trie, binaries):
                 print('Copying %s to %s' % (f, dir))
                 shutil.copy2(f, dir)
 
-    for extra_file in [ wav, alphabet, lm_binary, trie ]:
+    for extra_file in [ wav, lm_binary, trie ]:
         if extra_file and not os.path.isfile(os.path.join(dir, os.path.basename(extra_file))):
             print('Copying %s to %s' % (extra_file, dir))
             shutil.copy2(extra_file, dir)
@@ -374,10 +375,10 @@ def establish_ssh(target=None, auto_trust=False, allow_agent=True, look_keys=Tru
 
     return ssh_conn
 
-def run_benchmarks(dir, models, wav, alphabet, lm_binary=None, trie=None, iters=-1):
+def run_benchmarks(dir, models, wav, lm_binary=None, trie=None, iters=-1):
     r'''
     Core of the running of the benchmarks. We will run on all of models, against
-    the WAV file provided as wav, and the provided alphabet.
+    the WAV file provided as wav.
     '''
 
     assert_valid_dir(dir)
@@ -395,16 +396,16 @@ def run_benchmarks(dir, models, wav, alphabet, lm_binary=None, trie=None, iters=
         }
 
         if lm_binary and trie:
-            cmdline = './deepspeech --model "%s" --alphabet "%s" --lm "%s" --trie "%s" --audio "%s" -t' % (model_filename, alphabet, lm_binary, trie, wav)
+            cmdline = './deepspeech --model "%s" --lm "%s" --trie "%s" --audio "%s" -t' % (model_filename, lm_binary, trie, wav)
         else:
-            cmdline = './deepspeech --model "%s" --alphabet "%s" --audio "%s" -t' % (model_filename, alphabet, wav)
+            cmdline = './deepspeech --model "%s" --audio "%s" -t' % (model_filename, wav)
 
         for it in range(iters):
             sys.stdout.write('\rRunning %s: %d/%d' % (os.path.basename(model), (it+1), iters))
             sys.stdout.flush()
             rc, stdout, stderr = exec_command(cmdline, cwd=dir)
             if rc == 0:
-                inference_time = float(stdout.split('\n')[1].split('=')[-1])
+                inference_time = float(stdout.split(b'\n')[1].split(b'=')[-1])
                 # print("[%d] model=%s inference=%f" % (it, model, inference_time))
                 current_model['iters'].append(inference_time)
             else:
@@ -452,8 +453,6 @@ def handle_args():
                                  help='List of files (protocolbuffer) to work on. Might be a zip file.')
     parser.add_argument('--wav', required=False,
                                  help='WAV file to pass to native_client. Supply again in plotting mode to draw realine line.')
-    parser.add_argument('--alphabet', required=False,
-                                 help='Text file to pass to native_client for the alphabet.')
     parser.add_argument('--lm_binary', required=False,
                                  help='Path to the LM binary file used by the decoder.')
     parser.add_argument('--trie', required=False,
@@ -471,8 +470,8 @@ def handle_args():
 def do_main():
     cli_args = handle_args()
 
-    if not cli_args.models or not cli_args.wav or not cli_args.alphabet:
-        raise AssertionError('Missing arguments (models, wav or alphabet)')
+    if not cli_args.models or not cli_args.wav:
+        raise AssertionError('Missing arguments (models or wav)')
 
     if cli_args.dir is not None and not os.path.isdir(cli_args.dir):
         raise AssertionError('Inexistent temp directory')
@@ -483,18 +482,17 @@ def do_main():
     global ssh_conn
     ssh_conn = establish_ssh(target=cli_args.target, auto_trust=cli_args.autotrust, allow_agent=cli_args.allowagent, look_keys=cli_args.lookforkeys)
 
-    tempdir, sorted_models = setup_tempdir(dir=cli_args.dir, models=cli_args.models, wav=cli_args.wav, alphabet=cli_args.alphabet, lm_binary=cli_args.lm_binary, trie=cli_args.trie, binaries=cli_args.binaries)
+    tempdir, sorted_models = setup_tempdir(dir=cli_args.dir, models=cli_args.models, wav=cli_args.wav, lm_binary=cli_args.lm_binary, trie=cli_args.trie, binaries=cli_args.binaries)
 
     dest_sorted_models = list(map(lambda x: os.path.join(tempdir, os.path.basename(x)), sorted_models))
     dest_wav = os.path.join(tempdir, os.path.basename(cli_args.wav))
-    dest_alphabet = os.path.join(tempdir, os.path.basename(cli_args.alphabet))
 
     if cli_args.lm_binary and cli_args.trie:
         dest_lm_binary = os.path.join(tempdir, os.path.basename(cli_args.lm_binary))
         dest_trie = os.path.join(tempdir, os.path.basename(cli_args.trie))
-        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, alphabet=dest_alphabet, lm_binary=dest_lm_binary, trie=dest_trie, iters=cli_args.iters)
+        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, lm_binary=dest_lm_binary, trie=dest_trie, iters=cli_args.iters)
     else:
-        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, alphabet=dest_alphabet, iters=cli_args.iters)
+        inference_times = run_benchmarks(dir=tempdir, models=dest_sorted_models, wav=dest_wav, iters=cli_args.iters)
 
     if cli_args.csv:
         produce_csv(input=inference_times, output=cli_args.csv)

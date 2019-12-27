@@ -6,10 +6,14 @@ PROJECT_VERSION    ?= $(shell cat ../../VERSION | tr -d '\n')
 
 include ../definitions.mk
 
+ifeq ($(TARGET),host-win)
+LIBS := '$(shell cygpath -w $(subst .lib,,$(LIBS)))'
+endif
+
 default: build
 
 clean:
-	rm -f deepspeech_wrap.cxx package.json README.md
+	rm -f deepspeech_wrap.cxx package.json
 	rm -rf ./build/
 
 clean-npm-pack:
@@ -18,9 +22,6 @@ clean-npm-pack:
 
 really-clean: clean clean-npm-pack
 	rm -fr ./lib/
-
-README.md:
-	cp ../../README.md README.md
 
 package.json: package.json.in
 	sed \
@@ -32,17 +33,18 @@ configure: deepspeech_wrap.cxx package.json
 	$(NODE_BUILD_TOOL) configure $(NODE_BUILD_VERBOSE)
 
 build: configure deepspeech_wrap.cxx
-	AS=$(AS) CC=$(CC) CXX=$(CXX) LD=$(LD) CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS)" LDFLAGS="$(RPATH_NODEJS) $(LDFLAGS)" LIBS="$(LIBS)" $(NODE_BUILD_TOOL) $(NODE_PLATFORM_TARGET) $(NODE_ABI_TARGET) rebuild $(NODE_BUILD_VERBOSE)
+	AS=$(AS) CC=$(CC) CXX=$(CXX) LD=$(LD) CFLAGS="$(CFLAGS)" CXXFLAGS="$(CXXFLAGS)" LDFLAGS="$(RPATH_NODEJS) $(LDFLAGS)" LIBS=$(LIBS) $(NODE_BUILD_TOOL) $(NODE_PLATFORM_TARGET) $(NODE_RUNTIME) $(NODE_ABI_TARGET) $(NODE_DIST_URL) rebuild $(NODE_BUILD_VERBOSE)
 
 copy-deps: build
 	$(call copy_missing_libs,lib/binding/*/*/*/deepspeech.node,lib/binding/*/*/)
 
 node-wrapper: copy-deps build
-	$(NODE_BUILD_TOOL) $(NODE_PLATFORM_TARGET) $(NODE_ABI_TARGET) package $(NODE_BUILD_VERBOSE)
+	$(NODE_BUILD_TOOL) $(NODE_PLATFORM_TARGET) $(NODE_RUNTIME) $(NODE_ABI_TARGET) $(NODE_DIST_URL) package $(NODE_BUILD_VERBOSE)
 
-npm-pack: clean package.json README.md index.js
-	npm install node-pre-gyp@0.6.x
+npm-pack: clean package.json index.js
+	npm install node-pre-gyp@0.13.x
 	npm pack $(NODE_BUILD_VERBOSE)
 
 deepspeech_wrap.cxx: deepspeech.i
+	swig -version
 	swig -c++ -javascript -node deepspeech.i

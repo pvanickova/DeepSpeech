@@ -10,7 +10,7 @@
     "license": "MPL-2.0",
     "homepage": "https://github.com/mozilla/DeepSpeech/tree/v$(PROJECT_VERSION)#project-deepspeech",
     "files": [
-       "README.md",
+       "README.rst",
        "client.js",
        "index.js",
        "lib/*"
@@ -27,20 +27,18 @@
         "module_path" : "./lib/binding/v{version}/{platform}-{arch}/{node_abi}/",
         "remote_path" : "./v{version}/{configuration}/",
         "package_name": "{module_name}-v{version}-{node_abi}-{platform}-{arch}.tar.gz",
-        "host"        : "https://index.taskcluster.net/v1/task/project.deepspeech.tensorflow.pip.v1.0.0-warpctc.arm/artifacts/public/"
+        "host"        : "https://community-tc.services.mozilla.com/api/index/v1/task/project.deepspeech.tensorflow.pip.v1.0.0-warpctc.arm/artifacts/public/"
     },
     "dependencies"  : {
-      "node-pre-gyp": "0.6.x",
+      "node-pre-gyp": "0.13.x",
       "argparse": "1.0.x",
       "sox-stream": "2.0.x",
       "memory-stream": "0.0.3",
       "node-wav": "0.0.2"
     },
-    "bundledDependencies":["node-pre-gyp"],
     "devDependencies": {
     },
     "scripts": {
-        "install" : "node-pre-gyp install --fallback-to-build",
         "test": "node index.js"
     }
 }

@@ -2,7 +2,7 @@
 
 set -xe
 
-source $(dirname "$0")/../tc-tests-utils.sh
+source $(dirname "$0")/tc-tests-utils.sh
 
 source ${DS_ROOT_TASK}/DeepSpeech/tf/tc-vars.sh
 
@@ -21,8 +21,6 @@ do_bazel_build
 
 do_deepspeech_binary_build
 
-do_deepspeech_python_build rename_to_gpu
+do_deepspeech_python_build "--cuda"
 
-do_deepspeech_nodejs_build rename_to_gpu
-
-$(dirname "$0")/decoder-build.sh
+do_deepspeech_nodejs_build "--cuda"

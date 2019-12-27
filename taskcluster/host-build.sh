@@ -2,7 +2,9 @@
 
 set -xe
 
-source $(dirname "$0")/../tc-tests-utils.sh
+runtime=$1
+
+source $(dirname "$0")/tc-tests-utils.sh
 
 source ${DS_ROOT_TASK}/DeepSpeech/tf/tc-vars.sh
 
@@ -11,7 +13,11 @@ BAZEL_TARGETS="
 //native_client:generate_trie
 "
 
-BAZEL_BUILD_FLAGS="${BAZEL_OPT_FLAGS} ${BAZEL_EXTRA_FLAGS}"
+if [ "${runtime}" = "tflite" ]; then
+  BAZEL_BUILD_TFLITE="--define=runtime=tflite"
+fi;
+BAZEL_BUILD_FLAGS="${BAZEL_BUILD_TFLITE} ${BAZEL_OPT_FLAGS} ${BAZEL_EXTRA_FLAGS}"
+
 BAZEL_ENV_FLAGS="TF_NEED_CUDA=0"
 SYSTEM_TARGET=host
 
@@ -19,8 +25,11 @@ do_bazel_build
 
 do_deepspeech_binary_build
 
-do_deepspeech_python_build
+if [ "${runtime}" = "tflite" ]; then
+  do_deepspeech_python_build "--tflite"
+else
+  do_deepspeech_python_build
+fi
 
 do_deepspeech_nodejs_build
 
-$(dirname "$0")/decoder-build.sh

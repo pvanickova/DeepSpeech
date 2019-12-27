@@ -5,22 +5,52 @@ TFDIR     ?= $(abspath $(NC_DIR)/../../tensorflow)
 PREFIX    ?= /usr/local
 SO_SEARCH ?= $(TFDIR)/bazel-bin/
 
+TOOL_AS   := as
+TOOL_CC   := gcc
+TOOL_CXX  := c++
+TOOL_LD   := ld
+TOOL_LDD  := ldd
+
+DEEPSPEECH_BIN       := deepspeech
+CFLAGS_DEEPSPEECH    := -std=c++11 -o $(DEEPSPEECH_BIN)
+LINK_DEEPSPEECH      := -ldeepspeech
+LINK_PATH_DEEPSPEECH := -L${TFDIR}/bazel-bin/native_client
+
 ifeq ($(TARGET),host)
 TOOLCHAIN       :=
 CFLAGS          :=
 CXXFLAGS        :=
 LDFLAGS         :=
 SOX_CFLAGS      := `pkg-config --cflags sox`
+ifeq ($(OS),Linux)
+SOX_CFLAGS      += -fopenmp
+SOX_LDFLAGS     := -Wl,-Bstatic `pkg-config --static --libs sox` -lgsm `pkg-config --static --libs libpng | cut -d' ' -f1` -lz -lmagic -lltdl -Wl,-Bdynamic -ldl
+else # OS == Linux
 SOX_LDFLAGS     := `pkg-config --libs sox`
+endif # OS others
 PYTHON_PACKAGES := numpy${NUMPY_BUILD_VERSION}
 ifeq ($(OS),Linux)
 PYTHON_PLATFORM_NAME := --plat-name manylinux1_x86_64
 endif
 endif
 
+ifeq ($(TARGET),host-win)
+DEEPSPEECH_BIN  := deepspeech.exe
+TOOLCHAIN := '$(VCINSTALLDIR)\bin\amd64\'
+TOOL_CC   := cl.exe
+TOOL_CXX  := cl.exe
+TOOL_LD   := link.exe
+LINK_DEEPSPEECH      := $(TFDIR)\bazel-bin\native_client\libdeepspeech.so.if.lib
+LINK_PATH_DEEPSPEECH :=
+CFLAGS_DEEPSPEECH    := -nologo -Fe$(DEEPSPEECH_BIN)
+SOX_CFLAGS      :=
+SOX_LDFLAGS     :=
+PYTHON_PACKAGES := numpy${NUMPY_BUILD_VERSION}
+endif
+
 ifeq ($(TARGET),rpi3)
 TOOLCHAIN   ?= ${TFDIR}/bazel-$(shell basename "${TFDIR}")/external/LinaroArmGcc72/bin/arm-linux-gnueabihf-
-RASPBIAN    ?= $(abspath $(NC_DIR)/../multistrap-raspbian-stretch)
+RASPBIAN    ?= $(abspath $(NC_DIR)/../multistrap-raspbian-buster)
 CFLAGS      := -march=armv7-a -mtune=cortex-a53 -mfpu=neon-fp-armv8 -mfloat-abi=hard -D_GLIBCXX_USE_CXX11_ABI=0 --sysroot $(RASPBIAN)
 CXXFLAGS    := $(CXXFLAGS)
 LDFLAGS     := -Wl,-rpath-link,$(RASPBIAN)/lib/arm-linux-gnueabihf/ -Wl,-rpath-link,$(RASPBIAN)/usr/lib/arm-linux-gnueabihf/
@@ -30,8 +60,9 @@ SOX_LDFLAGS := $(RASPBIAN)/usr/lib/arm-linux-gnueabihf/libsox.so
 
 PYVER := $(shell python -c "import platform; maj, min, _ = platform.python_version_tuple(); print(maj+'.'+min);")
 PYTHON_PACKAGES      :=
-PYTHON_PATH          := PYTHONPATH=$(RASPBIAN)/usr/lib/python$(PYVER)/:$(RASPBIAN)/usr/lib/python$(PYVER)/plat-arm-linux-gnueabihf/:$(RASPBIAN)/usr/lib/python3/dist-packages/
-NUMPY_INCLUDE        := NUMPY_INCLUDE=$(RASPBIAN)/usr/include/python3.5/
+PYTHON_PATH          := PYTHONPATH=$(RASPBIAN)/usr/lib/python$(PYVER)/:$(RASPBIAN)/usr/lib/python3/dist-packages/
+NUMPY_INCLUDE        := NUMPY_INCLUDE=$(RASPBIAN)/usr/include/python3.7m/
+PYTHON_SYSCONFIGDATA := _PYTHON_SYSCONFIGDATA_NAME=_sysconfigdata_m_linux_arm-linux-gnueabihf
 PYTHON_PLATFORM_NAME := --plat-name linux_armv7l
 NODE_PLATFORM_TARGET := --target_arch=arm --target_platform=linux
 TOOLCHAIN_LDD_OPTS   := --root $(RASPBIAN)/
@@ -39,7 +70,7 @@ endif # ($(TARGET),rpi3)
 
 ifeq ($(TARGET),rpi3-armv8)
 TOOLCHAIN   ?= ${TFDIR}/bazel-$(shell basename "${TFDIR}")/external/LinaroAarch64Gcc72/bin/aarch64-linux-gnu-
-RASPBIAN    ?= $(abspath $(NC_DIR)/../multistrap-raspbian64-stretch)
+RASPBIAN    ?= $(abspath $(NC_DIR)/../multistrap-raspbian64-buster)
 CFLAGS      := -march=armv8-a -mtune=cortex-a53 -D_GLIBCXX_USE_CXX11_ABI=0 --sysroot $(RASPBIAN)
 CXXFLAGS    := $(CFLAGS)
 LDFLAGS     := -Wl,-rpath-link,$(RASPBIAN)/lib/aarch64-linux-gnu/ -Wl,-rpath-link,$(RASPBIAN)/usr/lib/aarch64-linux-gnu/
@@ -49,8 +80,9 @@ SOX_LDFLAGS := $(RASPBIAN)/usr/lib/aarch64-linux-gnu/libsox.so
 
 PYVER := $(shell python -c "import platform; maj, min, _ = platform.python_version_tuple(); print(maj+'.'+min);")
 PYTHON_PACKAGES      :=
-PYTHON_PATH          := PYTHONPATH=$(RASPBIAN)/usr/lib/python$(PYVER)/:$(RASPBIAN)/usr/lib/python$(PYVER)/plat-aarch64-linux-gnu/:$(RASPBIAN)/usr/lib/python3/dist-packages/
-NUMPY_INCLUDE        := NUMPY_INCLUDE=$(RASPBIAN)/usr/include/python3.5/
+PYTHON_PATH          := PYTHONPATH=$(RASPBIAN)/usr/lib/python$(PYVER)/:$(RASPBIAN)/usr/lib/python3/dist-packages/
+PYTHON_SYSCONFIGDATA := _PYTHON_SYSCONFIGDATA_NAME=_sysconfigdata_m_linux_aarch64-linux-gnu
+NUMPY_INCLUDE        := NUMPY_INCLUDE=$(RASPBIAN)/usr/include/python3.7/
 PYTHON_PLATFORM_NAME := --plat-name linux_aarch64
 NODE_PLATFORM_TARGET := --target_arch=arm64 --target_platform=linux
 TOOLCHAIN_LDD_OPTS   := --root $(RASPBIAN)/
@@ -65,21 +97,22 @@ LDFLAGS_NEEDED := -Wl,--no-as-needed
 LDFLAGS_RPATH  := -Wl,-rpath,\$$ORIGIN
 endif
 ifeq ($(OS),Darwin)
-LDFLAGS_NEEDED :=
+CXXFLAGS       += -stdlib=libc++ -mmacosx-version-min=10.10
+LDFLAGS_NEEDED := -stdlib=libc++ -mmacosx-version-min=10.10
 LDFLAGS_RPATH  := -Wl,-rpath,@executable_path
 endif
 
 CFLAGS   += $(EXTRA_CFLAGS)
 CXXFLAGS += $(EXTRA_CXXFLAGS)
-LIBS     := -ldeepspeech $(EXTRA_LIBS)
-LDFLAGS_DIRS := -L${TFDIR}/bazel-bin/native_client $(EXTRA_LDFLAGS)
+LIBS     := $(LINK_DEEPSPEECH) $(EXTRA_LIBS)
+LDFLAGS_DIRS := $(LINK_PATH_DEEPSPEECH) $(EXTRA_LDFLAGS)
 LDFLAGS  += $(LDFLAGS_NEEDED) $(LDFLAGS_RPATH) $(LDFLAGS_DIRS) $(LIBS)
 
-AS      := $(TOOLCHAIN)as
-CC      := $(TOOLCHAIN)gcc
-CXX     := $(TOOLCHAIN)c++
-LD      := $(TOOLCHAIN)ld
-LDD     := $(TOOLCHAIN)ldd $(TOOLCHAIN_LDD_OPTS)
+AS      := $(TOOLCHAIN)$(TOOL_AS)
+CC      := $(TOOLCHAIN)$(TOOL_CC)
+CXX     := $(TOOLCHAIN)$(TOOL_CXX)
+LD      := $(TOOLCHAIN)$(TOOL_LD)
+LDD     := $(TOOLCHAIN)$(TOOL_LDD) $(TOOLCHAIN_LDD_OPTS)
 
 RPATH_PYTHON         := '-Wl,-rpath,\$$ORIGIN/lib/' $(LDFLAGS_RPATH)
 RPATH_NODEJS         := '-Wl,-rpath,$$\$$ORIGIN/../'
@@ -110,6 +143,8 @@ define copy_missing_libs
         if [ "$(OS)" = "Darwin" ]; then \
             new_missing="$$( (for f in $$(otool -L $$lib 2>/dev/null | tail -n +2 | awk '{ print $$1 }' | grep -v '$$lib'); do ls -hal $$f; done;) 2>&1 | grep 'No such' | cut -d':' -f2 | xargs basename -a)"; \
             missing_libs="$$missing_libs $$new_missing"; \
+	elif [ "$(OS)" = "${TC_MSYS_VERSION}" ]; then \
+            missing_libs="libdeepspeech.so"; \
         else \
             missing_libs="$$missing_libs $$($(LDD) $$lib | grep 'not found' | awk '{ print $$1 }')"; \
         fi; \
@@ -117,6 +152,7 @@ define copy_missing_libs
     \
     for missing in $$missing_libs; do \
         find $(SO_SEARCH) -type f -name "$$missing" -exec cp {} $$TARGET_LIB_DIR \; ; \
+        chmod +w $$TARGET_LIB_DIR/*.so ; \
         if [ ! -z "$$MANIFEST_IN" ]; then \
             echo "include $$TARGET_LIB_DIR/$$missing" >> $$MANIFEST_IN; \
         fi; \

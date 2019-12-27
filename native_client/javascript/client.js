@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+'use strict';
 
 const Fs = require('fs');
 const Sox = require('sox-stream');
@@ -9,29 +10,6 @@ const Wav = require('node-wav');
 const Duplex = require('stream').Duplex;
 const util = require('util');
 
-// These constants control the beam search decoder
-
-// Beam width used in the CTC decoder when building candidate transcriptions
-const BEAM_WIDTH = 500;
-
-// The alpha hyperparameter of the CTC decoder. Language Model weight
-const LM_WEIGHT = 1.50;
-
-// Valid word insertion weight. This is used to lessen the word insertion penalty
-// when the inserted word is part of the vocabulary
-const VALID_WORD_COUNT_WEIGHT = 2.10;
-
-
-// These constants are tied to the shape of the graph used (changing them changes
-// the geometry of the first layer), so make sure you use the same constants that
-// were used during training
-
-// Number of MFCC features to use
-const N_FEATURES = 26;
-
-// Size of the context window used for producing timesteps in the input vector
-const N_CONTEXT = 9;
-
 var VersionAction = function VersionAction(options) {
   options = options || {};
   options.nargs = 0;
@@ -41,27 +19,62 @@ util.inherits(VersionAction, argparse.Action);
 
 VersionAction.prototype.call = function(parser) {
   Ds.printVersions();
+  let runtime = 'Node';
+  if (process.versions.electron) {
+    runtime = 'Electron';
+  }
+  console.error('Runtime: ' + runtime);
   process.exit(0);
 }
 
 var parser = new argparse.ArgumentParser({addHelp: true, description: 'Running DeepSpeech inference.'});
 parser.addArgument(['--model'], {required: true, help: 'Path to the model (protocol buffer binary file)'});
-parser.addArgument(['--alphabet'], {required: true, help: 'Path to the configuration file specifying the alphabet used by the network'});
 parser.addArgument(['--lm'], {help: 'Path to the language model binary file', nargs: '?'});
 parser.addArgument(['--trie'], {help: 'Path to the language model trie file created with native_client/generate_trie', nargs: '?'});
 parser.addArgument(['--audio'], {required: true, help: 'Path to the audio file to run (WAV format)'});
-parser.addArgument(['--version'], {action: VersionAction, help: 'Print version and exits'})
+parser.addArgument(['--beam_width'], {help: 'Beam width for the CTC decoder', defaultValue: 500, type: 'int'});
+parser.addArgument(['--lm_alpha'], {help: 'Language model weight (lm_alpha)', defaultValue: 0.75, type: 'float'});
+parser.addArgument(['--lm_beta'], {help: 'Word insertion bonus (lm_beta)', defaultValue: 1.85, type: 'float'});
+parser.addArgument(['--version'], {action: VersionAction, help: 'Print version and exits'});
+parser.addArgument(['--extended'], {action: 'storeTrue', help: 'Output string from extended metadata'});
 var args = parser.parseArgs();
 
 function totalTime(hrtimeValue) {
   return (hrtimeValue[0] + hrtimeValue[1] / 1000000000).toPrecision(4);
 }
 
+function metadataToString(metadata) {
+  var retval = ""
+  for (var i = 0; i < metadata.num_items; ++i) {
+    retval += metadata.items[i].character;
+  }
+  Ds.FreeMetadata(metadata);
+  return retval;
+}
+
+console.error('Loading model from file %s', args['model']);
+const model_load_start = process.hrtime();
+var model = new Ds.Model(args['model'], args['beam_width']);
+const model_load_end = process.hrtime(model_load_start);
+console.error('Loaded model in %ds.', totalTime(model_load_end));
+
+var desired_sample_rate = model.sampleRate();
+
+if (args['lm'] && args['trie']) {
+  console.error('Loading language model from files %s %s', args['lm'], args['trie']);
+  const lm_load_start = process.hrtime();
+  model.enableDecoderWithLM(args['lm'], args['trie'], args['lm_alpha'], args['lm_beta']);
+  const lm_load_end = process.hrtime(lm_load_start);
+  console.error('Loaded language model in %ds.', totalTime(lm_load_end));
+}
+
 const buffer = Fs.readFileSync(args['audio']);
 const result = Wav.decode(buffer);
 
-if (result.sampleRate < 16000) {
-  console.error('Warning: original sample rate (' + result.sampleRate + ') is lower than 16kHz. Up-sampling might produce erratic speech recognition.');
+if (result.sampleRate < desired_sample_rate) {
+  console.error('Warning: original sample rate (' + result.sampleRate + ') ' +
+                'is lower than ' + desired_sample_rate + 'Hz. ' +
+                'Up-sampling might produce erratic speech recognition.');
 }
 
 function bufferToStream(buffer) {
@@ -79,7 +92,7 @@ bufferToStream(buffer).
     },
     output: {
       bits: 16,
-      rate: 16000,
+      rate: desired_sample_rate,
       channels: 1,
       encoding: 'signed-integer',
       endian: 'little',
@@ -90,30 +103,21 @@ bufferToStream(buffer).
   pipe(audioStream);
 
 audioStream.on('finish', () => {
-  audioBuffer = audioStream.toBuffer();
-
-  console.error('Loading model from file %s', args['model']);
-  const model_load_start = process.hrtime();
-  var model = new Ds.Model(args['model'], N_FEATURES, N_CONTEXT, args['alphabet'], BEAM_WIDTH);
-  const model_load_end = process.hrtime(model_load_start);
-  console.error('Loaded model in %ds.', totalTime(model_load_end));
-
-  if (args['lm'] && args['trie']) {
-    console.error('Loading language model from files %s %s', args['lm'], args['trie']);
-    const lm_load_start = process.hrtime();
-    model.enableDecoderWithLM(args['alphabet'], args['lm'], args['trie'],
-                              LM_WEIGHT, VALID_WORD_COUNT_WEIGHT);
-    const lm_load_end = process.hrtime(lm_load_start);
-    console.error('Loaded language model in %ds.', totalTime(lm_load_end));
-  }
+  let audioBuffer = audioStream.toBuffer();
 
   const inference_start = process.hrtime();
   console.error('Running inference.');
-  const audioLength = (audioBuffer.length / 2) * ( 1 / 16000);
+  const audioLength = (audioBuffer.length / 2) * (1 / desired_sample_rate);
 
   // We take half of the buffer_size because buffer is a char* while
   // LocalDsSTT() expected a short*
-  console.log(model.stt(audioBuffer.slice(0, audioBuffer.length / 2), 16000));
+  if (args['extended']) {
+    console.log(metadataToString(model.sttWithMetadata(audioBuffer.slice(0, audioBuffer.length / 2))));
+  } else {
+    console.log(model.stt(audioBuffer.slice(0, audioBuffer.length / 2)));
+  }
   const inference_stop = process.hrtime(inference_start);
   console.error('Inference took %ds for %ds audio file.', totalTime(inference_stop), audioLength.toPrecision(4));
+  Ds.FreeModel(model);
+  process.exit(0);
 });
