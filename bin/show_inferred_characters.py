@@ -46,8 +46,8 @@ def audiofile_to_features(wav_filename):
 def softmax(x):
     """Compute softmax values for each sets of scores in x."""
 
-    e_x = np.exp(x - np.max(x))
-    return e_x / e_x.sum()
+    e_x = np.exp(x - np.max(x, axis=1))
+    return e_x / e_x.sum(axis=1)
 
 
 def create_overlapping_windows(batch_x):
@@ -122,7 +122,7 @@ def run_inference():
                       'previous_state_c': graph.get_tensor_by_name('prefix/previous_state_c:0'),
                       'previous_state_h': graph.get_tensor_by_name('prefix/previous_state_h: 0'),
                       'input_lengths': graph.get_tensor_by_name('prefix/input_lengths:0')}
-            outputs = {'outputs': graph.get_tensor_by_name('prefix/logits:0'),
+            outputs = {'outputs': graph.get_tensor_by_name('prefix/raw_logits:0'),
                        'new_state_c': graph.get_tensor_by_name('prefix/new_state_c:0'),
                        'new_state_h': graph.get_tensor_by_name('prefix/new_state_h: 0'),
                        }
